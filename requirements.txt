@@ -7,3 +7,6 @@ google-auth<3,>=2
 python-dotenv>=1.0.1
 pyautogui>=0.9.54
 watchdog>=5.0.3
+openai>=1.54.3
+fpdf>=1.7.2
+types-fpdf2

@@ -6,7 +6,7 @@ import platform
 from collections.abc import Callable
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, cast
+from typing import Any, cast, TypeVar, Union
 
 from anthropic import Anthropic, AnthropicBedrock, AnthropicVertex, APIResponse
 from anthropic.types import (
@@ -22,7 +22,7 @@ from anthropic.types.beta import (
     BetaToolResultBlockParam,
 )
 
-from tools import BashTool, ComputerTool, EditTool, ToolCollection, ToolResult
+from tools import BashTool, ComputerTool, EditTool, JobApplicationTool, ToolCollection, ToolResult
 
 BETA_FLAG = "computer-use-2024-10-22"
 
@@ -60,7 +60,7 @@ PROVIDER_TO_DEFAULT_MODEL_NAME: dict[APIProvider, str] = {
 # * If the item you are looking at is a pdf, if after taking a single screenshot of the pdf it seems that you want to read the entire document instead of trying to continue to read the pdf from your screenshots + navigation, determine the URL, use curl to download the pdf, install and use pdftotext (available via homebrew) to convert it to a text file, and then read that text file directly with your StrReplaceEditTool.
 # </IMPORTANT>"""
 SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
-* You are utilizing a macOS Sonoma 15.7 environment using {platform.machine()} architecture with command line internet access.
+* You are utilizing a macOS Sequoia 15.1 environment using {platform.machine()} architecture with command line & internet access.
 * Package management:
   - Use homebrew for package installation
   - Use curl for HTTP requests
@@ -68,10 +68,11 @@ SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
   - Use pip for Python packages
 
 * Browser automation available via Playwright:
-  - Supports Chrome, Firefox, and WebKit
+  - Supports Brave, Chrome, and WebKit
   - Can handle JavaScript-heavy applications
   - Capable of screenshots, navigation, and interaction
   - Handles dynamic content loading
+  - Open a new tab with Command + T for anything in the browser
 
 * System automation:
   - cliclick for simulating mouse/keyboard input
@@ -90,10 +91,24 @@ SYSTEM_PROMPT = f"""<SYSTEM_CAPABILITY>
   - Use grep with context: grep -n -B <before> -A <after> <query> <filename>
   - Stream processing with awk, sed, and other text utilities
 
-* Note: Command line function calls may have latency. Chain multiple operations into single requests where feasible.
+* Using bash tool in iTerm or Terminal you can start GUI applications. GUI apps can be launched directly or with `open -a "Application Name"`. GUI apps will appear natively within macOS, but they may take some time to appear. Take a screenshot to confirm it did.
+* When using your bash tool with commands that are expected to output very large quantities of text, redirect into a tmp file and use str_replace_editor or `grep -n -B <lines before> -A <lines after> <query> <filename>` to confirm output.
+* When viewing a page it can be helpful to zoom out so that you can see everything on the page. In Chrome, use Command + "-" to zoom out or Command + "+" to zoom in.
+* When using your computer function calls, they take a while to run and send back to you. Where possible/feasible, try to chain multiple of these calls all into one function calls request.
 
 * The current date is {datetime.today().strftime('%A, %B %-d, %Y')}.
-</SYSTEM_CAPABILITY>"""
+</SYSTEM_CAPABILITY>
+<IMPORTANT>
+* When using Brave, if any first-time setup dialogs appear, IGNORE THEM. Instead, click directly in the address bar and enter the appropriate search term or URL there.
+* If the item you are looking at is a pdf, if after taking a single screenshot of the pdf it seems that you want to read the entire document instead of trying to continue to read the pdf from your screenshots + navigation, determine the URL, use curl to download the pdf, install and use pdftotext (available via homebrew) to convert it to a text file, and then read that text file directly with your StrReplaceEditTool.
+* Remember, I am right there with you. I will be there to help you log in to websites, and provide you with any personal or contextual information to accomplish your task.
+* You can assume that I am already logged in to any websites you need to visit. And I'm not, I will be there to help you log in. Please use Brave for all web browsing and prefer opening a tab over a new window.
+* If I ask you to apply to jobs, know that I am a Tech Product Manager. I am interested in jobs that pay above $180,000/year. Technical Product Manager, Product Manager, Program Manager, Senior Product Manager, and Staff Product Manager are all reasonable job titles.
+</IMPORTANT>
+"""
+
+# Add type variable for client
+ClientType = TypeVar('ClientType', Anthropic, AnthropicVertex, AnthropicBedrock)
 
 async def sampling_loop(
     *,
@@ -115,6 +130,7 @@ async def sampling_loop(
         ComputerTool(),
         BashTool(),
         EditTool(),
+        JobApplicationTool(),
     )
     system = (
         f"{SYSTEM_PROMPT}{' ' + system_prompt_suffix if system_prompt_suffix else ''}"
@@ -125,11 +141,11 @@ async def sampling_loop(
             _maybe_filter_to_n_most_recent_images(messages, only_n_most_recent_images)
 
         if provider == APIProvider.ANTHROPIC:
-            client = Anthropic(api_key=api_key)
+            client: ClientType = Anthropic(api_key=api_key)
         elif provider == APIProvider.VERTEX:
-            client = AnthropicVertex()
+            client: ClientType = AnthropicVertex()
         elif provider == APIProvider.BEDROCK:
-            client = AnthropicBedrock()
+            client: ClientType = AnthropicBedrock()
 
         # Call the API
         # we use raw_response to provide debug information to streamlit. Your
@@ -156,7 +172,7 @@ async def sampling_loop(
         )
 
         tool_result_content: list[BetaToolResultBlockParam] = []
-        for content_block in cast(list[BetaContentBlock], response.content):
+        for content_block in response.content:
             print("CONTENT", content_block)
             output_callback(content_block)
             if content_block.type == "tool_use":
@@ -186,20 +202,17 @@ def _maybe_filter_to_n_most_recent_images(
     images in place, with a chunk of min_removal_threshold to reduce the amount we
     break the implicit prompt cache.
     """
-    if images_to_keep is None:
+    if images_to_keep is None or not isinstance(images_to_keep, int):
         return messages
 
-    tool_result_blocks = cast(
-        list[ToolResultBlockParam],
-        [
-            item
-            for message in messages
-            for item in (
-                message["content"] if isinstance(message["content"], list) else []
-            )
-            if isinstance(item, dict) and item.get("type") == "tool_result"
-        ],
-    )
+    tool_result_blocks = [
+        item
+        for message in messages
+        for item in (
+            message["content"] if isinstance(message["content"], list) else []
+        )
+        if isinstance(item, dict) and item.get("type") == "tool_result"
+    ]
 
     total_images = sum(
         1
